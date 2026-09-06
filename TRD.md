@@ -26,6 +26,8 @@
 | ORM | Prisma | PostgreSQL 스키마와 마이그레이션 관리 |
 | 데이터베이스 | PostgreSQL | 관계 무결성, 트랜잭션, 스냅샷 보존 |
 | 차트 | 접근성 지원 React 차트 라이브러리 | 막대그래프 우선, 레이더 차트 보조 |
+| AI 플랫폼 | Microsoft Azure AI Foundry Model Router | 모델 라우팅, 중앙 정책, 기반 모델 교체 독립성 |
+| Azure 인증 | `DefaultAzureCredential` + Managed Identity | 운영 환경에서 장기 수명 API 키 제거 |
 | 테스트 | Vitest + React Testing Library + Playwright | 단위, 컴포넌트, 핵심 사용자 흐름 |
 | 품질 | ESLint + Prettier + TypeScript compiler | 커밋 전 정적 검증 |
 | 배포 | Docker 기반 Node.js 실행 환경 | 환경 일관성과 관리형 서비스 이식성 |
@@ -52,7 +54,7 @@ src/
     ai/                        # AI 포트, 프롬프트, 응답 정규화
   infrastructure/
     db/                        # Prisma client와 repository 구현
-    ai/                        # 외부 모델 provider 구현
+    ai/                        # Foundry Model Router provider 구현
     auth/                      # 인증 provider 구현
     observability/             # 로깅, 메트릭, 추적
   lib/
@@ -301,7 +303,7 @@ scoreGap < 5         -> low
 - `422`: 도메인 규칙 위반
 - `429`: 요청 또는 AI 사용량 제한
 - `500`: 처리되지 않은 서버 오류
-- `502/503`: 외부 AI 제공자 오류
+- `502/503`: Foundry 또는 Model Router 외부 서비스 오류
 
 ## 8. AI 통합 사양
 
@@ -317,7 +319,39 @@ interface AiProvider {
 }
 ```
 
-### 8.2 구조화 응답 규칙
+### 8.2 Microsoft Foundry Model Router 연결
+
+MVP의 기본 `AiProvider` 구현은 `FoundryModelRouterProvider`로 한다.
+
+- Azure AI Foundry 프로젝트 엔드포인트를 사용한다.
+- 호출 대상은 개별 모델 이름이 아니라 Foundry Model Router의 배포 이름이다.
+- 운영 인증은 Azure SDK의 `DefaultAzureCredential`을 사용하고, Azure 호스팅 환경에서는 Managed Identity를 선택한다.
+- Router가 내부적으로 선택한 모델은 애플리케이션의 기능 계약이나 점수 계산의 입력으로 직접 사용하지 않는다.
+- 환경별 프로젝트, 배포 이름, 리전, 정책을 환경 설정으로 주입한다.
+
+```ts
+type FoundryModelRouterConfig = {
+  projectEndpoint: string;
+  routerDeploymentName: string;
+  apiVersion?: string;
+  requestTimeoutMs: number;
+};
+```
+
+호출 경계:
+
+```text
+Decision Service
+  -> AiProvider
+  -> FoundryModelRouterProvider
+  -> Azure credential provider
+  -> Microsoft Foundry project endpoint
+  -> Model Router deployment
+```
+
+애플리케이션 코드, 프롬프트, 테스트는 `routerDeploymentName` 외의 특정 기반 모델명을 참조하지 않는다.
+
+### 8.3 구조화 응답 규칙
 
 - 모델 호출은 JSON schema 또는 동등한 structured output을 요구한다.
 - 반환 후 Zod 스키마로 필수 필드, enum, 배열 길이, 문자열 길이를 검증한다.
@@ -326,12 +360,20 @@ interface AiProvider {
 - 모델 응답의 `totalScore`, `rank`, `stabilityLevel`은 무시하고 서버 계산 결과를 사용한다.
 - AI가 만든 객체는 `source: 'ai'`로 저장하고 사용자 수정 시 `source: 'user'`로 바꾼다.
 
-### 8.3 프롬프트 입력 제한
+### 8.4 프롬프트 입력 제한
 
 - 사용자 원문과 메모의 최대 길이를 서버에서 제한한다.
 - 시스템 지침, 사용자 데이터, 계산용 JSON을 프롬프트에서 명확히 구분한다.
 - 외부 검색을 사용하지 않는 MVP에서는 최신 사실을 추정하지 않도록 지시한다.
 - 의료/법률/투자/안전 신호가 감지되면 답변을 참고용으로 제한한다.
+
+### 8.5 Router 운영 계약
+
+- 요청마다 `requestId`와 상관관계를 유지한다.
+- 가능한 경우 Foundry/Router 응답에서 실제 선택 모델, 라우팅 정책 식별자, 지연 시간, 토큰 사용량을 추출해 관찰성 이벤트로 기록한다.
+- 실제 선택 모델이 응답에 없거나 제공되지 않는 경우 해당 필드는 `unknown`으로 저장하고 추측하지 않는다.
+- Router 정책 변경 후에는 고정 평가 세트로 분석 품질, 구조화 응답 성공률, 비용, 지연 시간을 비교한다.
+- 모델 라우팅 결과가 달라져도 서버의 점수 계산, 안정성 구간, 사용자 수정값은 변경하지 않는다.
 
 ## 9. 인증, 권한, 개인정보
 
@@ -385,7 +427,11 @@ RATE_LIMITED           사용량 제한
 - `durationMs`
 - `statusCode`
 - `errorCode`
-- `aiProvider`
+- `aiProvider`: `microsoft-foundry`
+- `foundryProject`
+- `routerDeployment`
+- `routedModel` (제공되는 경우, 없으면 `unknown`)
+- `routerPolicy` (제공되는 경우)
 - `aiLatencyMs`
 - `tokenUsage` (제공되는 경우)
 
@@ -396,6 +442,8 @@ RATE_LIMITED           사용량 제한
 - API 요청 성공/실패율과 p95 지연 시간
 - 점수 계산 지연 시간
 - AI 성공률, 재시도율, 오류 유형별 비율
+- Router 배포별 성공률, 지연 시간, 토큰 사용량, 비용 추정치
+- Router 정책/기반 모델 변경 전후의 평가 점수와 구조화 응답 성공률
 - 결정 생성 대비 확정 전환율
 - What-if 요청 수
 - 사용자 입력 수정 비율
@@ -419,6 +467,8 @@ RATE_LIMITED           사용량 제한
 - 선택지/기준/평가 CRUD와 소유권 검사
 - 결정 확정 시 스냅샷과 상태 변경의 원자성
 - AI 실패 후 수동 진행
+- Foundry 인증 실패 및 Model Router 오류의 수동 진행
+- Router가 선택한 모델 변경 시 고정 평가 세트 회귀 검증
 - 결정 삭제 시 연관 데이터 정리
 
 ### 11.3 E2E 테스트
@@ -438,7 +488,9 @@ RATE_LIMITED           사용량 제한
 - 저장된 데이터로 수행하는 점수 계산 API p95는 300ms 이하를 목표로 한다.
 - 일반 CRUD API p95는 500ms 이하를 목표로 한다.
 - AI 분석은 30초 타임아웃을 사용하고, UI에 진행 상태를 표시한다.
+- Foundry Model Router 호출은 `AI_REQUEST_TIMEOUT_MS`를 적용하고, 재시도는 최대 1회로 제한한다.
 - AI 호출은 사용자/세션별 rate limit을 적용한다.
+- Foundry 프로젝트와 Router 배포별 사용량/비용 제한을 운영 정책으로 설정한다.
 - DB 연결 풀과 요청 타임아웃을 설정한다.
 - 스키마 변경은 마이그레이션으로만 반영하고, 배포 전 staging에서 검증한다.
 - 운영 배포는 빌드, 타입 검사, 린트, 단위/통합 테스트 통과를 조건으로 한다.
@@ -448,9 +500,9 @@ RATE_LIMITED           사용량 제한
 
 ```text
 DATABASE_URL
-AI_PROVIDER
-AI_API_KEY
-AI_MODEL
+FOUNDRY_PROJECT_ENDPOINT
+FOUNDRY_ROUTER_DEPLOYMENT
+FOUNDRY_API_VERSION
 AI_REQUEST_TIMEOUT_MS
 AUTH_SECRET
 APP_BASE_URL
@@ -458,7 +510,7 @@ LOG_LEVEL
 RATE_LIMIT_STORE_URL
 ```
 
-비밀값은 저장소에 커밋하지 않는다. `.env.example`에는 이름과 안전한 예시만 두고 실제 값은 환경의 Secret Manager에서 주입한다.
+운영에서는 `DefaultAzureCredential`과 Managed Identity를 사용하므로 `AI_API_KEY`를 필수 환경 변수로 두지 않는다. 로컬 개발에서는 Azure CLI 로그인 또는 개발자 자격 증명을 사용한다. 비밀값은 저장소에 커밋하지 않으며, `.env.example`에는 이름과 안전한 예시만 두고 실제 값은 환경의 Secret Manager에서 주입한다.
 
 ## 14. 구현 순서
 

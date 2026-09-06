@@ -22,7 +22,7 @@
 | 웹 계층 | 서버 렌더링 중심의 React 웹앱 | 초기 로딩, 접근성, 폼 중심 흐름에 유리 |
 | API | 버전이 있는 REST API | 웹 클라이언트와 도메인 테스트를 분리하고 향후 모바일 클라이언트에 대비 |
 | 영속성 | 관계형 데이터베이스 | 결정, 선택지, 기준, 평가, 스냅샷의 무결성과 조회가 중요 |
-| AI 호출 | 서버 전용 AI 어댑터 | API 키 보호 및 모델 제공자 교체 |
+| AI 호출 | 서버 전용 Microsoft Foundry Model Router 어댑터 | Azure 구독 내 중앙 라우팅, 모델 교체 독립성, API 키 비노출 |
 | 점수 계산 | 서버 도메인 서비스 + 클라이언트 미리보기 | 저장/확정 결과의 신뢰성을 보장하고 조절 중에는 즉시 피드백 제공 |
 | 비동기 처리 | MVP에서는 요청-응답, 지연 증가 시 작업 큐로 분리 | 초기 구현을 단순하게 유지하되 확장 경로 확보 |
 
@@ -37,7 +37,8 @@ flowchart LR
     Calc[Scoring Engine]
     Repo[Repository Layer]
     DB[(PostgreSQL)]
-    Provider[LLM Provider]
+    Foundry[Microsoft Foundry Project]
+    Router[Model Router Deployment]
     Obs[Logs and Metrics]
 
     Browser --> Web
@@ -45,7 +46,8 @@ flowchart LR
     Decision --> Calc
     Decision --> AI
     Decision --> Repo
-    AI --> Provider
+    AI --> Foundry
+    Foundry --> Router
     Repo --> DB
     Web --> Obs
     AI --> Obs
@@ -89,7 +91,15 @@ AI 기능을 다음 단계로 분리한다.
 4. `evaluateOptions`: 기준별 점수와 근거
 5. `explainDecision`: 결과의 주요 기여 요인, 약점, 상충 요소, 확인 질문
 
-AI Orchestrator는 모델 응답을 스키마로 검증한 뒤 도메인 명령으로 변환한다. 모델이 반환한 종합 점수나 안정성은 신뢰하지 않고 Scoring Engine에서 다시 계산한다.
+AI Orchestrator는 Microsoft Foundry Model Router의 논리적 배포를 호출하고, 모델 응답을 스키마로 검증한 뒤 도메인 명령으로 변환한다. 애플리케이션은 개별 기반 모델을 직접 선택하지 않는다. 모델이 반환한 종합 점수나 안정성은 신뢰하지 않고 Scoring Engine에서 다시 계산한다.
+
+#### Foundry Model Router 경계
+
+- 애플리케이션은 Foundry 프로젝트 엔드포인트와 Router 배포 이름만 사용한다.
+- Router가 내부적으로 선택하는 기반 모델, 버전, 라우팅 정책은 애플리케이션 코드와 분리한다.
+- Router 호출은 Entra ID 기반 자격 증명과 Managed Identity를 우선 사용하며, API 키는 개발용 예외로만 취급한다.
+- 응답에는 구조화된 출력 계약을 요구하고, 호출 직후 런타임 스키마 검증을 수행한다.
+- 실제 선택 모델, 라우팅 정책 버전, 지연 시간, 토큰 사용량은 비민감 운영 메타데이터로 추적하되 사용자 고민 원문은 기록하지 않는다.
 
 ### 3.4 Scoring Engine
 
@@ -128,7 +138,8 @@ sequenceDiagram
     participant API as API Layer
     participant Domain as Decision Service
     participant AI as AI Orchestrator
-    participant LLM as LLM Provider
+    participant Foundry as Foundry Project
+    participant Router as Model Router Deployment
     participant DB as PostgreSQL
 
     User->>UI: 고민과 선택적 조건 입력
@@ -137,8 +148,10 @@ sequenceDiagram
     Domain->>DB: 결정 초안 저장
     UI->>API: POST /analyze
     API->>AI: analyzeProblem
-    AI->>LLM: 구조화된 분석 요청
-    LLM-->>AI: JSON 응답
+    AI->>Foundry: 구조화된 분석 요청
+    Foundry->>Router: 라우팅된 모델 호출
+    Router-->>Foundry: 구조화된 JSON 응답
+    Foundry-->>AI: JSON 응답 및 라우팅 메타데이터
     AI->>AI: 스키마 검증 및 정규화
     AI-->>Domain: 분석 제안
     Domain->>DB: 분석 결과와 AI 출처 저장
@@ -175,14 +188,16 @@ flowchart TB
     CDN[CDN or Edge Cache]
     App[Web Application Container]
     DB[(Managed PostgreSQL)]
-    LLM[External LLM API]
+    Foundry[Microsoft Foundry Project]
+    Router[Model Router Deployment]
     Secrets[Secret Manager]
     Monitor[Application Monitoring]
 
     User --> CDN
     CDN --> App
     App --> DB
-    App --> LLM
+    App --> Foundry
+    Foundry --> Router
     App --> Secrets
     App --> Monitor
 ```
@@ -191,21 +206,23 @@ flowchart TB
 
 - 하나의 웹 애플리케이션 컨테이너
 - 하나의 관리형 PostgreSQL 인스턴스
-- 외부 LLM API
-- 비밀값을 보관하는 Secret Manager
+- Microsoft Foundry 프로젝트와 Model Router 배포
+- Entra ID 인증 및 애플리케이션 Managed Identity
+- 개발 환경용 Secret Manager 또는 환경 변수
 - 애플리케이션 로그와 오류 모니터링
 
 웹앱과 API를 별도 서비스로 나누지 않는다. AI 호출량이나 작업 시간이 증가해 요청 시간이 제품 경험을 해치면 AI Worker와 작업 큐를 별도 배포 단위로 분리한다.
 
 ### 5.2 환경
 
-- `local`: 로컬 PostgreSQL 또는 개발용 컨테이너, 테스트 AI 어댑터
-- `staging`: 운영과 동일한 스키마, 제한된 AI 사용량
-- `production`: 관리형 DB, Secret Manager, 모니터링, 백업
+- `local`: 로컬 PostgreSQL 또는 개발용 컨테이너, Foundry Router를 모사하는 테스트 AI 어댑터
+- `staging`: 운영과 동일한 스키마, 별도 Foundry 프로젝트 또는 Router 배포, 제한된 AI 사용량
+- `production`: 관리형 DB, 운영 Foundry 프로젝트/Router 배포, Managed Identity, 모니터링, 백업
 
 ## 6. 보안 및 개인정보 경계
 
-- AI API 키는 브라우저에 전달하지 않는다.
+- Foundry 프로젝트 엔드포인트와 Router 배포 호출은 서버에서만 수행하며 브라우저에 자격 증명을 전달하지 않는다.
+- 운영에서는 Managed Identity와 Entra ID를 사용하고 장기 수명 AI API 키를 저장하지 않는다.
 - 모든 결정 조회/수정은 사용자 소유권 검사를 거친다.
 - 입력 길이, 선택지 수, 기준 수, 메모 크기를 서버에서 제한한다.
 - HTML을 허용하지 않고 텍스트를 기본값으로 저장해 XSS를 줄인다.
@@ -220,13 +237,14 @@ flowchart TB
 | --- | --- | --- |
 | AI 시간 초과 | 재시도 또는 수동 입력 선택 | 요청을 실패로 표시하고 초안은 보존 |
 | AI 구조 검증 실패 | 다시 분석 | 원본 응답은 사용자 화면에 노출하지 않고 오류 기록 |
-| AI 제공자 오류 | 수동 비교로 진행 | AI 의존 단계만 차단하고 도메인 기능은 유지 |
+| Foundry/Router 오류 | 수동 비교로 진행 | AI 의존 단계만 차단하고 도메인 기능은 유지 |
 | DB 일시 오류 | 저장 재시도 | 트랜잭션 롤백, 중복 요청 방지 키 사용 |
 | 클라이언트 연결 끊김 | 페이지 재접속 | 저장된 초안과 마지막 스냅샷 복원 |
 | 잘못된 점수 입력 | 오류 메시지 확인 | 서버 범위 검증으로 저장 거부 |
 
 ## 8. 확장 경로
 
+- Foundry Router 정책 변경: Router 배포 설정만 변경하고 `AiProvider` 계약은 유지
 - AI 제공자 추가: `AiProvider` 인터페이스 구현체 추가
 - 저장소 추가: repository 인터페이스 구현체 추가
 - 모바일 클라이언트: 동일 REST API 사용
@@ -239,4 +257,5 @@ flowchart TB
 - AI가 평가 점수를 생성하면 근거가 약한 숫자가 정밀한 판단처럼 보일 수 있다. 따라서 점수 출처와 불확실성을 표시하고 사용자 수정 권한을 제공한다.
 - 기준 수가 많아지면 가중 평균이 사용자의 실제 판단을 과도하게 단순화할 수 있다. MVP에서는 기준 개수를 안내하고, 결과에 기여도를 함께 표시한다.
 - 로그인 없이 저장하면 기록 복구가 어렵고, 로그인부터 시작하면 첫 경험이 무거워진다. MVP 착수 전에 익명 저장과 계정 저장 중 하나를 결정해야 한다.
+- Router가 선택한 기반 모델이 바뀌면 응답 품질과 비용이 달라질 수 있다. 구조화 응답 검증, 고정 평가 세트, 라우팅 메타데이터 모니터링으로 회귀를 감지한다.
 - 외부 최신 데이터가 없으면 구매 의사결정의 품질이 제한된다. MVP에서는 외부 데이터 자동 수집을 약속하지 않고 사용자 입력과 출처 확인을 우선한다.
