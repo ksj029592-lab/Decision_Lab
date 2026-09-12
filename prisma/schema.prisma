@@ -1,0 +1,150 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum DecisionStatus {
+  draft
+  analyzing
+  comparing
+  decided
+  archived
+}
+
+enum SourceType {
+  user
+  ai
+}
+
+enum CriterionDirection {
+  higher_is_better
+  lower_is_better
+}
+
+enum StabilityLevel {
+  high
+  medium
+  low
+  unavailable
+}
+
+model User {
+  id              String     @id @default(uuid())
+  externalSubject String?    @map("external_subject")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  decisions       Decision[]
+
+  @@map("users")
+}
+
+model Decision {
+  id               String            @id @default(uuid())
+  userId           String            @map("user_id")
+  title            String
+  problemStatement String            @map("problem_statement")
+  summary          String?
+  status           DecisionStatus    @default(draft)
+  selectedOptionId String?           @map("selected_option_id")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  decidedAt        DateTime?         @map("decided_at")
+  archivedAt       DateTime?         @map("archived_at")
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  options          Option[]
+  criteria         Criterion[]
+  snapshots        DecisionSnapshot[]
+  retrospective    Retrospective?
+
+  @@index([userId, updatedAt(sort: Desc)])
+  @@map("decisions")
+}
+
+model Option {
+  id          String       @id @default(uuid())
+  decisionId  String       @map("decision_id")
+  name        String
+  description String?
+  prosJson    Json?        @map("pros_json")
+  consJson    Json?        @map("cons_json")
+  memo        String?
+  source      SourceType   @default(user)
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  decision    Decision     @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  evaluations Evaluation[]
+
+  @@index([decisionId])
+  @@map("options")
+}
+
+model Criterion {
+  id          String             @id @default(uuid())
+  decisionId  String             @map("decision_id")
+  name        String
+  description String?
+  importance  Int                @default(3)
+  direction   CriterionDirection @default(higher_is_better)
+  source      SourceType         @default(user)
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  decision    Decision           @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  evaluations Evaluation[]
+
+  @@index([decisionId])
+  @@map("criteria")
+}
+
+model Evaluation {
+  id          String     @id @default(uuid())
+  optionId    String     @map("option_id")
+  criterionId String     @map("criterion_id")
+  score       Float      @default(0)
+  reason      String?
+  source      SourceType @default(user)
+  createdAt   DateTime   @default(now()) @map("created_at")
+  updatedAt   DateTime   @updatedAt @map("updated_at")
+
+  option      Option     @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  criterion   Criterion  @relation(fields: [criterionId], references: [id], onDelete: Cascade)
+
+  @@unique([optionId, criterionId])
+  @@map("evaluations")
+}
+
+model DecisionSnapshot {
+  id                   String         @id @default(uuid())
+  decisionId           String         @map("decision_id")
+  criteriaWeightsJson  Json           @map("criteria_weights_json")
+  optionScoresJson     Json           @map("option_scores_json")
+  totalScoresJson      Json           @map("total_scores_json")
+  rankingJson          Json           @map("ranking_json")
+  stabilityLevel       StabilityLevel @map("stability_level")
+  scoreGap             Float?         @map("score_gap")
+  createdAt            DateTime       @default(now()) @map("created_at")
+
+  decision             Decision       @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@index([decisionId])
+  @@map("decision_snapshots")
+}
+
+model Retrospective {
+  id                  String   @id @default(uuid())
+  decisionId          String   @unique @map("decision_id")
+  satisfactionScore   Int      @map("satisfaction_score")
+  importantInPractice String?  @map("important_in_practice")
+  memo                String?
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  decision            Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+
+  @@map("retrospectives")
+}
