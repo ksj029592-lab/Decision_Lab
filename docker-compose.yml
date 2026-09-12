@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: decision_lab_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: decision_lab
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d decision_lab"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: decision_lab_web
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgrespassword@db:5432/decision_lab?schema=public
+      - FOUNDRY_PROJECT_ENDPOINT=${FOUNDRY_PROJECT_ENDPOINT:-https://dummy-foundry-resource.services.ai.azure.com/api/projects/dummy-project}
+      - FOUNDRY_ROUTER_DEPLOYMENT=${FOUNDRY_ROUTER_DEPLOYMENT:-model-router}
+      - FOUNDRY_API_VERSION=${FOUNDRY_API_VERSION:-2024-06-01}
+      - AI_REQUEST_TIMEOUT_MS=${AI_REQUEST_TIMEOUT_MS:-30000}
+      - AUTH_SECRET=${AUTH_SECRET:-default-dev-auth-secret-key-change-me-in-prod}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
